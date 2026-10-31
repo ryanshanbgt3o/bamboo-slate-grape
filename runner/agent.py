@@ -276,5 +276,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        progress(f"runner_failed ({type(error).__name__})")
+        reason = f"HTTP {error.code}" if isinstance(error, urllib.error.HTTPError) else type(error).__name__
+        progress(f"runner_failed ({reason})")
         raise SystemExit(1)
