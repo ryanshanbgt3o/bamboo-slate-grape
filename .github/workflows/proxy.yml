@@ -1,4 +1,4 @@
-# tsmanager template d3bf41cba2e3102de750b687a583f21afba222dbabe855703bae01bae7858699
+# tsmanager template cf4a302eac0ffdd92cdf7d9465516a27cb8d6e3a4fed081809dd641743be1132
 name: Project proxy tests
 run-name: tsm-${{ inputs.attempt }}
 on:
