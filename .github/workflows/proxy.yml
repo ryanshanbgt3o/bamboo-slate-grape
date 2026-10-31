@@ -1,0 +1,25 @@
+# tsmanager template d3bf41cba2e3102de750b687a583f21afba222dbabe855703bae01bae7858699
+name: Project proxy tests
+run-name: tsm-${{ inputs.attempt }}
+on:
+  workflow_dispatch:
+    inputs:
+      attempt:
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  proxy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Run project test proxy
+        env:
+          TSM_CONTROL_URL: "https://tsmanager.mnsj.dev"
+          TSM_AUDIENCE: "https://tsmanager.mnsj.dev/proxy-runs"
+          TSM_ATTEMPT: ${{ inputs.attempt }}
+          GH_TOKEN: ${{ github.token }}
+        run: sudo --preserve-env=TSM_CONTROL_URL,TSM_AUDIENCE,TSM_ATTEMPT,GH_TOKEN,ACTIONS_ID_TOKEN_REQUEST_URL,ACTIONS_ID_TOKEN_REQUEST_TOKEN python3 runner/agent.py
