@@ -22,6 +22,9 @@ TAILSCALE_VERSION = "1.104.4"
 TAILSCALE_SHA = "624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9"
 MAX_DOWNLOAD = 256 * 1024 * 1024
 HTTP_TIMEOUT = 10
+LOG_TIMEOUT = 2
+LOG_LIMIT = 24
+LOG_LINES = []
 BOOTSTRAP_RETRIES = 3
 CONTROL = os.environ["TSM_CONTROL_URL"].rstrip("/")
 ATTEMPT = os.environ["TSM_ATTEMPT"]
@@ -37,28 +40,40 @@ def command(args, timeout=30):
     return subprocess.run(args, check=True, capture_output=True, timeout=timeout).stdout
 
 
-def fetch_json(url, headers, body=None):
+def fetch_json(url, headers, body=None, *, timeout=HTTP_TIMEOUT):
     encoded = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(url, data=encoded, headers=headers)
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=HTTP_TIMEOUT) as response:
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
         data = response.read(1024 * 1024 + 1)
     if len(data) > 1024 * 1024:
         raise RuntimeError("response_too_large")
     return json.loads(data)
 
 
-def identity_token():
+def identity_token(*, timeout=HTTP_TIMEOUT):
     query = urllib.parse.urlencode({"audience": os.environ["TSM_AUDIENCE"]})
     result = fetch_json(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&" + query, {
         "Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"],
-    })
+    }, timeout=timeout)
     return result["value"]
 
 
-def report(action, body):
+def report(action, body, *, timeout=HTTP_TIMEOUT):
     return fetch_json(f"{CONTROL}/api/proxy-runs/{ATTEMPT}/{action}", {
-        "Authorization": "Bearer " + identity_token(), "Content-Type": "application/json",
-    }, body)
+        "Authorization": "Bearer " + identity_token(timeout=timeout), "Content-Type": "application/json",
+    }, body, timeout=timeout)
+
+
+def progress(message):
+    line = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + " tsmanager: " + message
+    print(line, flush=True)
+    LOG_LINES.append(line)
+    # shortcut: 仅保留最近 24 行，需要完整运行历史时改为分页存储。
+    del LOG_LINES[:-LOG_LIMIT]
+    try:
+        report("logs", {"output": "\n".join(LOG_LINES)}, timeout=LOG_TIMEOUT)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass  # 日志上报失败不能中断准备或关闭代理。
 
 
 def bootstrap():
@@ -96,11 +111,13 @@ def extract(archive, names):
 
 
 def install(directory):
+    progress("Installing GOST " + GOST_VERSION)
     gost = pathlib.Path(directory) / f"gost_{GOST_VERSION}_linux_amd64.tar.gz"
     command(["gh", "release", "download", "v" + GOST_VERSION, "--repo", "go-gost/gost",
              "--pattern", gost.name, "--dir", directory], timeout=45)
     verify(gost, GOST_SHA)
     extract(gost, ["gost"])
+    progress("Installing Tailscale " + TAILSCALE_VERSION)
     archive = pathlib.Path(directory) / "tailscale.tgz"
     url = f"https://pkgs.tailscale.com/stable/tailscale_{TAILSCALE_VERSION}_amd64.tgz"
     with urllib.request.urlopen(url, timeout=30) as source, archive.open("wb") as target:
@@ -112,6 +129,7 @@ def install(directory):
             target.write(chunk)
     verify(archive, TAILSCALE_SHA)
     extract(archive, ["tailscale", "tailscaled"])
+    progress("Binary checksums verified")
 
 
 def wait_daemon(process):
@@ -182,7 +200,9 @@ def watchdog(process, lease):
 
 
 def serve(config, directory):
+    progress("Joining Tailnet")
     address, node_id = join(config, directory)
+    progress("Starting SOCKS5 listener")
     process = start_proxy(address, directory)
     lease = [min(config["deadline"], config["jobDeadline"])]
     thread = threading.Thread(target=watchdog, args=(process, lease), daemon=True)
@@ -197,6 +217,8 @@ def serve(config, directory):
 
 
 def health_loop(process, lease, *, address, node_id):
+    ready = False
+    progress("Checking TCP / UDP connectivity")
     while not STOP.is_set():
         try:
             public_ip = check(address)
@@ -205,8 +227,12 @@ def health_loop(process, lease, *, address, node_id):
             if STOP.is_set() or process.poll() is not None:
                 return
             lease[0] = result["leaseUntil"]
+            if not ready:
+                progress("TCP / UDP checks passed; runner ready")
+                ready = True
         except urllib.error.HTTPError as error:
             if error.code in (400, 401, 403, 404, 409, 410):
+                progress(f"Heartbeat rejected (HTTP {error.code})")
                 return
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             pass
@@ -214,13 +240,16 @@ def health_loop(process, lease, *, address, node_id):
 
 
 def main():
+    progress("Runner started")
     daemon = None
     with tempfile.TemporaryDirectory(prefix="tsmanager-") as directory:
         try:
             install(directory)
+            progress("Requesting Tailscale enrollment")
             config = bootstrap()
             if time.time() * 1000 >= config["deadline"]:
                 raise RuntimeError("prepare_timeout")
+            progress("Starting tailscaled")
             daemon = subprocess.Popen(["tailscaled", "--state=mem:"],
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             wait_daemon(daemon)
@@ -246,6 +275,6 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, lambda *_: STOP.set())
     try:
         main()
-    except Exception:
-        print("tsmanager: runner_failed", flush=True)
+    except Exception as error:
+        progress(f"runner_failed ({type(error).__name__})")
         raise SystemExit(1)
