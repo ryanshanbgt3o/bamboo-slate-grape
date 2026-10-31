@@ -42,7 +42,7 @@ def command(args, timeout=30):
 
 def fetch_json(url, headers, body=None, *, timeout=HTTP_TIMEOUT):
     encoded = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(url, data=encoded, headers=headers)
+    request = urllib.request.Request(url, data=encoded, headers={"User-Agent": "tsmanager-runner/1.0", **headers})
     with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
         data = response.read(1024 * 1024 + 1)
     if len(data) > 1024 * 1024:
